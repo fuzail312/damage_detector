@@ -8,6 +8,7 @@ from typing import List, Tuple
 
 app = FastAPI()
 
+
 class Detection:
     def __init__(self, model_path: str, classes: List[str]):
         self.model_path = model_path
