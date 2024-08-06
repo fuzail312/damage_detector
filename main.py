@@ -1,8 +1,12 @@
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
-from typing import List, Tuple
 import os
 import shutil
+from typing import List, Tuple
+
+app = FastAPI()
 
 class Detection:
     def __init__(self, model_path: str, classes: List[str]):
@@ -68,53 +72,52 @@ class Detection:
         results = self.__extract_output(preds=preds, image_shape=image.shape[:2], input_shape=(height, width), score=score, nms=nms, confidence=confidence)
         return results
 
-def process_image(image_path: str, output_folder: str):
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image file not found at {image_path}")
-    
-    if os.path.exists(output_folder):
-        shutil.rmtree(output_folder)
-    os.makedirs(output_folder)
+def save_uploaded_file(upload_file: UploadFile, output_folder: str) -> str:
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    file_path = os.path.join(output_folder, upload_file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(upload_file.file, buffer)
+    return file_path
+
+@app.post("/process-image/")
+async def process_image(image: UploadFile = File(...)):
+    output_folder = "detected_images"
+    image_path = save_uploaded_file(image, output_folder)
 
     detection = Detection(
         model_path='best.onnx',
         classes=['damaged door', 'damaged window', 'damaged headlight', 'damaged mirror', 'dent', 'damaged hood', 'damaged bumper', 'damaged wind shield']
     )
 
-    print("Processing image, please wait...")
-
-    image = cv2.imread(image_path)
-    results = detection(image)
+    image_np = cv2.imread(image_path)
+    results = detection(image_np)
 
     detected_boxes = results['boxes']
-    saved_images = set()
 
     if detected_boxes:
         image_filename = os.path.basename(image_path)
         output_image_path = os.path.join(output_folder, image_filename)
 
-        # Avoid saving duplicate images
-        if output_image_path not in saved_images:
-            for box, conf, cls in zip(detected_boxes, results['confidences'], results['classes']):
-                left, top, width, height = box
-                right, bottom = left + width, top + height
-                label = f"{cls} ({conf:.2f}%)"
-                
-                cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
-                cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        for box, conf, cls in zip(detected_boxes, results['confidences'], results['classes']):
+            left, top, width, height = box
+            right, bottom = left + width, top + height
+            label = f"{cls} ({conf:.2f}%)"
 
-            cv2.imwrite(output_image_path, image)
-            saved_images.add(output_image_path)
+            cv2.rectangle(image_np, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(image_np, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    print(f"Detected images saved in folder: {output_folder}")
+        cv2.imwrite(output_image_path, image_np)
 
-def process_video(video_path: str, output_folder: str, frames_per_second: int):
+    return JSONResponse(content={"message": "Image processed successfully", "output_image": output_image_path})
+
+@app.post("/process-video/")
+async def process_video(video: UploadFile = File(...), frames_per_second: int = -1):
+    output_folder = "detected_images"
+    video_path = save_uploaded_file(video, output_folder)
+
     if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video file not found at {video_path}")
-    
-    if os.path.exists(output_folder):
-        shutil.rmtree(output_folder)
-    os.makedirs(output_folder)
+        raise HTTPException(status_code=404, detail="Video file not found")
 
     cap = cv2.VideoCapture(video_path)
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -131,11 +134,9 @@ def process_video(video_path: str, output_folder: str, frames_per_second: int):
         classes=['damaged door', 'damaged window', 'damaged headlight', 'damaged mirror', 'dent', 'damaged hood', 'damaged bumper', 'damaged wind shield']
     )
 
-    print("Processing video, please wait...")
-
     frame_number = 0
     processed_boxes = []
-    saved_images = set()  # To track saved images and avoid duplicates
+    saved_images = set()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -148,11 +149,10 @@ def process_video(video_path: str, output_folder: str, frames_per_second: int):
 
             new_boxes = []
             for box in detected_boxes:
-                # Check for overlap with previously detected boxes
                 overlap_found = False
                 for prev_box in processed_boxes:
                     iou = compute_iou(box, prev_box)
-                    if iou > 0.5:  # Threshold for overlap
+                    if iou > 0.5:
                         overlap_found = True
                         break
 
@@ -163,13 +163,12 @@ def process_video(video_path: str, output_folder: str, frames_per_second: int):
             if new_boxes:
                 image_path = os.path.join(output_folder, f"frame_{frame_number:04d}.jpg")
 
-                # Avoid saving duplicate images
                 if image_path not in saved_images:
                     for box, conf, cls in zip(new_boxes, results['confidences'], results['classes']):
                         left, top, width, height = box
                         right, bottom = left + width, top + height
                         label = f"{cls} ({conf:.2f}%)"
-                        
+
                         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
                         cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
@@ -179,10 +178,9 @@ def process_video(video_path: str, output_folder: str, frames_per_second: int):
         frame_number += 1
 
     cap.release()
-    print(f"Detected images saved in folder: {output_folder}")
+    return JSONResponse(content={"message": "Video processed successfully", "output_folder": output_folder})
 
 def compute_iou(boxA, boxB):
-    # Compute the intersection over union (IoU) of two bounding boxes
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
@@ -194,23 +192,3 @@ def compute_iou(boxA, boxB):
     
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
-
-if __name__ == '__main__':
-    print("Choose an option:")
-    print("1. Process Image")
-    print("2. Process Video")
-    choice = input("Enter your choice (1/2): ").strip()
-
-    if choice == '1':
-        image_path = input("Enter the path to your image: ").strip()
-        output_folder = "detected_images"
-        process_image(image_path, output_folder)
-
-    elif choice == '2':
-        video_path = input("Enter the path to your video: ").strip()
-        frames_per_second = int(input("Enter the number of frames you want to process per second (enter -1 to process all frames): ").strip())
-        output_folder = "detected_images"
-        process_video(video_path, output_folder, frames_per_second)
-
-    else:
-        print("Invalid choice. Please enter 1 for image processing or 2 for video processing.")
