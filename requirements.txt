@@ -1,0 +1,5 @@
+fastapi==0.95.1
+uvicorn==0.22.0
+opencv-python-headless==4.7.0.72
+pyngrok==5.2.1
+ultralytics==8.0.56 
