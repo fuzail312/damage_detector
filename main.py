@@ -5,8 +5,8 @@ import os
 import shutil
 import numpy as np
 import tempfile
-from typing import List
 import zipfile
+from typing import List
 
 app = FastAPI()
 
@@ -14,19 +14,22 @@ def process_image_file(file_path: str) -> str:
     # Load the image
     image = cv2.imread(file_path)
     
-    # Perform image processing (example: convert to grayscale)
-    processed_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Example detection: Draw a box around the center of the image
+    height, width = image.shape[:2]
+    top_left = (width // 4, height // 4)
+    bottom_right = (3 * width // 4, 3 * height // 4)
+    
+    # Draw a rectangle on the image (replace this with your actual detection logic)
+    cv2.rectangle(image, top_left, bottom_right, (0, 255, 0), 2)
     
     # Save the processed image in the same directory
     processed_file_path = os.path.splitext(file_path)[0] + "_processed.jpg"
-    cv2.imwrite(processed_file_path, processed_image)
+    cv2.imwrite(processed_file_path, image)
     
     return processed_file_path
 
 def process_video_file(file_path: str) -> List[str]:
     cap = cv2.VideoCapture(file_path)
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
     # Create a folder in the same directory to save processed frames
     video_dir = os.path.splitext(file_path)[0] + "_processed_frames"
