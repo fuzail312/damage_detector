@@ -84,8 +84,7 @@ detection = Detection(
     classes=['damaged door', 'damaged window', 'damaged headlight', 'damaged mirror', 'dent', 'damaged hood', 'damaged bumper', 'damaged wind shield']
 )
 
-def process_image(image: np.ndarray, width: int = 640, height: int = 640, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> np.ndarray:
-    results = detection(image, width=width, height=height, score=score, nms=nms, confidence=confidence)
+def draw_detections(image: np.ndarray, results: dict) -> np.ndarray:
     for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
         left, top, width, height = box
         right, bottom = left + width, top + height
@@ -108,7 +107,7 @@ def process_video(video_path: str, output_folder: str, detection_delay: int = 30
         
     cap = cv2.VideoCapture(video_path)
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
-    frames_per_second = 15
+    frames_per_second = 20
     frame_interval = int(frame_rate / frames_per_second)
 
     previous_detections = []
@@ -130,8 +129,9 @@ def process_video(video_path: str, output_folder: str, detection_delay: int = 30
                         break
 
                 if save_frame:
+                    marked_frame = draw_detections(frame.copy(), results)
                     output_frame_path = os.path.join(output_folder, f"frame_{frame_number}.jpg")
-                    cv2.imwrite(output_frame_path, frame)
+                    cv2.imwrite(output_frame_path, marked_frame)
                     previous_detections.append(frame)
                 
                 if len(previous_detections) > detection_delay:
