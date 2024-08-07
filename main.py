@@ -1,3 +1,4 @@
+
 # Import necessary libraries
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
@@ -152,8 +153,3 @@ async def process_video(file: UploadFile = File(...)):
 
     process_video(input_path, output_path)
     return FileResponse(output_path, media_type="video/mp4")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8081)
