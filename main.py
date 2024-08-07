@@ -1,9 +1,12 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 import cv2
 import os
 import shutil
 import numpy as np
+import tempfile
+from typing import List
+import zipfile
 
 app = FastAPI()
 
@@ -20,7 +23,7 @@ def process_image_file(file_path: str) -> str:
     
     return processed_file_path
 
-def process_video_file(file_path: str) -> list:
+def process_video_file(file_path: str) -> List[str]:
     cap = cv2.VideoCapture(file_path)
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -59,6 +62,9 @@ def process_video_file(file_path: str) -> list:
 
 @app.post("/process_image/")
 async def process_image(file: UploadFile = File(...)):
+    if file.content_type not in ["image/jpeg", "image/png"]:
+        raise HTTPException(status_code=400, detail="Invalid image type. Only JPEG and PNG are supported.")
+    
     # Save uploaded file to a local path
     upload_folder = "uploads"
     os.makedirs(upload_folder, exist_ok=True)
@@ -73,6 +79,9 @@ async def process_image(file: UploadFile = File(...)):
 
 @app.post("/process_video/")
 async def process_video(file: UploadFile = File(...)):
+    if file.content_type not in ["video/mp4"]:
+        raise HTTPException(status_code=400, detail="Invalid video type. Only MP4 is supported.")
+    
     # Save uploaded file to a local path
     upload_folder = "uploads"
     os.makedirs(upload_folder, exist_ok=True)
@@ -84,16 +93,15 @@ async def process_video(file: UploadFile = File(...)):
     # Process the video
     processed_frame_files = process_video_file(file_path)
     
-    # Create a directory for processed frames
-    processed_frames_dir = os.path.splitext(file_path)[0] + "_processed_frames"
-    os.makedirs(processed_frames_dir, exist_ok=True)
-    
-    # Move processed frames to the directory
-    for frame_file in processed_frame_files:
-        shutil.move(frame_file, os.path.join(processed_frames_dir, os.path.basename(frame_file)))
-    
-    # Return the path to the directory containing processed frames
-    return {"processed_frames_directory": processed_frames_dir}
+    # Create a temporary directory for the zip file
+    with tempfile.TemporaryDirectory() as tempdir:
+        # Create a zip file
+        zip_path = os.path.join(tempdir, "processed_frames.zip")
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for frame_file in processed_frame_files:
+                zipf.write(frame_file, os.path.basename(frame_file))
+        
+        return FileResponse(zip_path, media_type="application/zip", filename="processed_frames.zip")
 
 if __name__ == "__main__":
     import uvicorn
