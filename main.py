@@ -90,19 +90,24 @@ def process_image(image: np.ndarray, width: int = 640, height: int = 640, score:
         cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     return image
 
-def process_video(video_path: str, output_video_path: str, detection_delay: int = 30):
+def is_frame_different(frame1: np.ndarray, frame2: np.ndarray, threshold: float = 0.1) -> bool:
+    diff = cv2.absdiff(frame1, frame2)
+    non_zero_count = np.count_nonzero(diff)
+    total_pixels = diff.size
+    return (non_zero_count / total_pixels) > threshold
+
+def process_video(video_path: str, output_folder: str, detection_delay: int = 30):
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+        
     cap = cv2.VideoCapture(video_path)
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
-    
     frames_per_second = 20
     frame_interval = int(frame_rate / frames_per_second)
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video_path, fourcc, frame_rate, (frame_width, frame_height))
-
+    previous_detections = []
     frame_number = 0
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -111,25 +116,24 @@ def process_video(video_path: str, output_video_path: str, detection_delay: int 
         if frame_number % frame_interval == 0:
             results = detection(frame)
             if results['boxes']:
-                for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
-                    left, top, width, height = box
-                    right, bottom = left + width, top + height
-                    label = f"{cls} ({conf:.2f}%)"
+                save_frame = True
 
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                for prev_frame in previous_detections:
+                    if not is_frame_different(frame, prev_frame):
+                        save_frame = False
+                        break
 
-                for _ in range(detection_delay):
-                    out.write(frame)
-            else:
-                out.write(frame)
-        else:
-            out.write(frame)
+                if save_frame:
+                    output_frame_path = os.path.join(output_folder, f"frame_{frame_number}.jpg")
+                    cv2.imwrite(output_frame_path, frame)
+                    previous_detections.append(frame)
+                
+                if len(previous_detections) > detection_delay:
+                    previous_detections.pop(0)
 
         frame_number += 1
 
     cap.release()
-    out.release()
 
 @app.post("/process-image/")
 async def process_image_endpoint(file: UploadFile = File(...)):
@@ -144,23 +148,29 @@ async def process_image_endpoint(file: UploadFile = File(...)):
     return StreamingResponse(BytesIO(buffer), media_type="image/jpeg")
 
 @app.post("/process-video/")
-async def process_video_endpoint(file: UploadFile = File(...), detection_delay: int = 30):
+async def process_video_endpoint(file: UploadFile = File(...)):
     video_data = await file.read()
     temp_video_path = "temp_video.mp4"
 
     with open(temp_video_path, "wb") as f:
         f.write(video_data)
     
-    output_video_path = "output_video.mp4"
-    process_video(temp_video_path, output_video_path, detection_delay)
+    output_folder = "output_frames"
+    process_video(temp_video_path, output_folder)
     
-    with open(output_video_path, "rb") as f:
-        video_bytes = f.read()
+    # Create a zip file with the frames
+    import shutil
+    output_zip_path = "output_frames.zip"
+    shutil.make_archive("output_frames", 'zip', output_folder)
+
+    with open(output_zip_path, "rb") as f:
+        zip_bytes = f.read()
 
     os.remove(temp_video_path)
-    os.remove(output_video_path)
+    shutil.rmtree(output_folder)
+    os.remove(output_zip_path)
     
-    return StreamingResponse(BytesIO(video_bytes), media_type="video/mp4")
+    return StreamingResponse(BytesIO(zip_bytes), media_type="application/zip")
 
 if __name__ == "__main__":
     import uvicorn
