@@ -1,19 +1,14 @@
-
-# Import necessary libraries
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-import numpy as np
+from fastapi.responses import StreamingResponse
+from io import BytesIO
 import cv2
+import numpy as np
 import os
-from typing import List, Tuple
-import uvicorn
-import nest_asyncio
-
-# Apply the nest_asyncio patch to allow nested event loops in Colab
-nest_asyncio.apply()
+from typing import List
 
 app = FastAPI()
 
+# Define the Detection class as provided
 class Detection:
     def __init__(self, model_path: str, classes: List[str]):
         self.model_path = model_path
@@ -78,78 +73,95 @@ class Detection:
         results = self.__extract_output(preds=preds, image_shape=image.shape[:2], input_shape=(height, width), score=score, nms=nms, confidence=confidence)
         return results
 
+# Instantiate your detection model
 detection = Detection(
     model_path='best.onnx',
     classes=['damaged door', 'damaged window', 'damaged headlight', 'damaged mirror', 'dent', 'damaged hood', 'damaged bumper', 'damaged wind shield']
 )
 
-@app.post("/process-image/")
-async def process_image(file: UploadFile = File(...)):
-    if file.content_type not in ["image/jpeg", "image/png"]:
-        raise HTTPException(status_code=400, detail="Invalid image type. Only JPEG and PNG are supported.")
-
-    image_data = await file.read()
-    image = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
-    
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image data.")
-    
-    results = detection(image)
-    output_path = "output_image.jpg"
-    
+def process_image(image: np.ndarray, width: int = 640, height: int = 640, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> np.ndarray:
+    results = detection(image, width=width, height=height, score=score, nms=nms, confidence=confidence)
     for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
         left, top, width, height = box
         right, bottom = left + width, top + height
         label = f"{cls} ({conf:.2f}%)"
+
         cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
         cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    return image
+
+def process_video(video_path: str, output_video_path: str, detection_delay: int = 30):
+    cap = cv2.VideoCapture(video_path)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_rate = cap.get(cv2.CAP_PROP_FPS)
     
-    cv2.imwrite(output_path, image)
-    return FileResponse(output_path, media_type="image/jpeg")
+    frames_per_second = 20
+    frame_interval = int(frame_rate / frames_per_second)
 
-@app.post("/process-video/")
-async def process_video(file: UploadFile = File(...)):
-    if file.content_type not in ["video/mp4"]:
-        raise HTTPException(status_code=400, detail="Invalid video type. Only MP4 is supported.")
-    
-    video_data = await file.read()
-    input_path = "input_video.mp4"
-    output_path = "output_video.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_video_path, fourcc, frame_rate, (frame_width, frame_height))
 
-    with open(input_path, "wb") as f:
-        f.write(video_data)
-    
-    def process_video(video_path: str, output_video_path: str, frames_per_second: int = 20, detection_delay: int = 30):
-        cap = cv2.VideoCapture(video_path)
-        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frame_rate = cap.get(cv2.CAP_PROP_FPS)
+    frame_number = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        frame_interval = int(frame_rate / frames_per_second)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(output_video_path, fourcc, frame_rate, (frame_width, frame_height))
-
-        frame_count = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_count % frame_interval == 0:
-                results = detection(frame)
-
+        if frame_number % frame_interval == 0:
+            results = detection(frame)
+            if results['boxes']:
                 for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
                     left, top, width, height = box
                     right, bottom = left + width, top + height
                     label = f"{cls} ({conf:.2f}%)"
+
                     cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
                     cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+                for _ in range(detection_delay):
+                    out.write(frame)
+            else:
+                out.write(frame)
+        else:
             out.write(frame)
-            frame_count += 1
 
-        cap.release()
-        out.release()
+        frame_number += 1
 
-    process_video(input_path, output_path)
-    return FileResponse(output_path, media_type="video/mp4")
+    cap.release()
+    out.release()
+
+@app.post("/process-image/")
+async def process_image_endpoint(file: UploadFile = File(...)):
+    image_data = await file.read()
+    image = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    
+    processed_image = process_image(image)
+
+    _, buffer = cv2.imencode('.jpg', processed_image)
+    return StreamingResponse(BytesIO(buffer), media_type="image/jpeg")
+
+@app.post("/process-video/")
+async def process_video_endpoint(file: UploadFile = File(...), detection_delay: int = 30):
+    video_data = await file.read()
+    temp_video_path = "temp_video.mp4"
+
+    with open(temp_video_path, "wb") as f:
+        f.write(video_data)
+    
+    output_video_path = "output_video.mp4"
+    process_video(temp_video_path, output_video_path, detection_delay)
+    
+    with open(output_video_path, "rb") as f:
+        video_bytes = f.read()
+
+    os.remove(temp_video_path)
+    os.remove(output_video_path)
+    
+    return StreamingResponse(BytesIO(video_bytes), media_type="video/mp4")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8081)
