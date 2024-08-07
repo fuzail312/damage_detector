@@ -94,11 +94,23 @@ def draw_detections(image: np.ndarray, results: dict) -> np.ndarray:
         cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     return image
 
-def is_frame_different(frame1: np.ndarray, frame2: np.ndarray, threshold: float = 0.1) -> bool:
-    diff = cv2.absdiff(frame1, frame2)
+def is_frame_different(new_frame: np.ndarray, prev_frame: np.ndarray, prev_boxes: List[np.ndarray], new_boxes: List[np.ndarray], threshold: float = 0.1) -> bool:
+    # Check image content difference
+    diff = cv2.absdiff(new_frame, prev_frame)
     non_zero_count = np.count_nonzero(diff)
     total_pixels = diff.size
-    return (non_zero_count / total_pixels) > threshold
+    image_diff = (non_zero_count / total_pixels) > threshold
+
+    # Check bounding box differences
+    box_diff = True
+    if prev_boxes and new_boxes:
+        for new_box in new_boxes:
+            for prev_box in prev_boxes:
+                if np.array_equal(new_box, prev_box):
+                    box_diff = False
+                    break
+
+    return image_diff or box_diff
 
 def process_video(video_path: str, output_folder: str, detection_delay: int = 30):
     logging.info(f"Processing video: {video_path}")
@@ -110,7 +122,8 @@ def process_video(video_path: str, output_folder: str, detection_delay: int = 30
     frames_per_second = 20
     frame_interval = int(frame_rate / frames_per_second)
 
-    previous_detections = []
+    previous_frames = []
+    previous_boxes = []
     frame_number = 0
 
     while cap.isOpened():
@@ -122,9 +135,8 @@ def process_video(video_path: str, output_folder: str, detection_delay: int = 30
             results = detection(frame)
             if results['boxes']:
                 save_frame = True
-
-                for prev_frame in previous_detections:
-                    if not is_frame_different(frame, prev_frame):
+                for i, prev_frame in enumerate(previous_frames):
+                    if not is_frame_different(frame, prev_frame, previous_boxes[i], results['boxes']):
                         save_frame = False
                         break
 
@@ -132,10 +144,12 @@ def process_video(video_path: str, output_folder: str, detection_delay: int = 30
                     marked_frame = draw_detections(frame.copy(), results)
                     output_frame_path = os.path.join(output_folder, f"frame_{frame_number}.jpg")
                     cv2.imwrite(output_frame_path, marked_frame)
-                    previous_detections.append(frame)
+                    previous_frames.append(frame)
+                    previous_boxes.append(results['boxes'])
                 
-                if len(previous_detections) > detection_delay:
-                    previous_detections.pop(0)
+                if len(previous_frames) > detection_delay:
+                    previous_frames.pop(0)
+                    previous_boxes.pop(0)
 
         frame_number += 1
 
