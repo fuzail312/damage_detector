@@ -4,7 +4,7 @@ from io import BytesIO
 import cv2
 import numpy as np
 import os
-from typing import List
+from typing import List, Tuple
 
 app = FastAPI()
 
