@@ -5,7 +5,6 @@ import numpy as np
 import cv2
 import os
 from typing import List, Tuple
-from pyngrok import ngrok
 import uvicorn
 import nest_asyncio
 
