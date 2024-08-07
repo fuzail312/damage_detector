@@ -1,32 +1,27 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from io import BytesIO
+from zipfile import ZipFile
 import cv2
 import numpy as np
 import os
-from typing import List, Tuple
-import logging
+import shutil
 
-logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
-# Define the Detection class as provided
 class Detection:
-    def __init__(self, model_path: str, classes: List[str]):
+    def __init__(self, model_path: str, classes: list):
         self.model_path = model_path
         self.classes = classes
         self.model = self.__load_model()
 
     def __load_model(self) -> cv2.dnn_Net:
-        logging.info(f"Loading model from {self.model_path}")
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Model file {self.model_path} not found")
         net = cv2.dnn.readNet(self.model_path)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA_FP16)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
         return net
 
-    def __extract_output(self, preds: np.ndarray, image_shape: Tuple[int, int], input_shape: Tuple[int, int], score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> dict:
+    def __extract_output(self, preds: np.ndarray, image_shape: tuple, input_shape: tuple, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> dict:
         class_ids, confs, boxes = [], [], []
 
         image_height, image_width = image_shape
@@ -84,7 +79,8 @@ detection = Detection(
     classes=['damaged door', 'damaged window', 'damaged headlight', 'damaged mirror', 'dent', 'damaged hood', 'damaged bumper', 'damaged wind shield']
 )
 
-def draw_detections(image: np.ndarray, results: dict) -> np.ndarray:
+def process_image(image: np.ndarray, width: int = 640, height: int = 640, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> np.ndarray:
+    results = detection(image, width=width, height=height, score=score, nms=nms, confidence=confidence)
     for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
         left, top, width, height = box
         right, bottom = left + width, top + height
@@ -94,78 +90,30 @@ def draw_detections(image: np.ndarray, results: dict) -> np.ndarray:
         cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     return image
 
-def is_frame_different(new_frame: np.ndarray, prev_frame: np.ndarray, prev_boxes: List[np.ndarray], new_boxes: List[np.ndarray], threshold: float = 0.1) -> bool:
-    # Check image content difference
-    diff = cv2.absdiff(new_frame, prev_frame)
-    non_zero_count = np.count_nonzero(diff)
-    total_pixels = diff.size
-    image_diff = (non_zero_count / total_pixels) > threshold
+def overlap_percentage(box1, box2):
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    area1 = w1 * h1
+    area2 = w2 * h2
 
-    # Check bounding box differences
-    box_diff = True
-    if prev_boxes and new_boxes:
-        for new_box in new_boxes:
-            for prev_box in prev_boxes:
-                if np.array_equal(new_box, prev_box):
-                    box_diff = False
-                    break
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+    inter_width = max(0, xi2 - xi1)
+    inter_height = max(0, yi2 - yi1)
+    intersection = inter_width * inter_height
 
-    return image_diff or box_diff
+    union = area1 + area2 - intersection
 
-def process_video(video_path: str, output_folder: str, detection_delay: int = 30):
-    logging.info(f"Processing video: {video_path}")
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-        
-    cap = cv2.VideoCapture(video_path)
-    frame_rate = cap.get(cv2.CAP_PROP_FPS)
-    frames_per_second = 20
-    frame_interval = int(frame_rate / frames_per_second)
+    return intersection / union
 
-    previous_frames = []
-    previous_boxes = []
-    frame_number = 0
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_number % frame_interval == 0:
-            results = detection(frame)
-            if results['boxes']:
-                save_frame = True
-                for i, prev_frame in enumerate(previous_frames):
-                    if not is_frame_different(frame, prev_frame, previous_boxes[i], results['boxes']):
-                        save_frame = False
-                        break
-
-                if save_frame:
-                    marked_frame = draw_detections(frame.copy(), results)
-                    output_frame_path = os.path.join(output_folder, f"frame_{frame_number}.jpg")
-                    cv2.imwrite(output_frame_path, marked_frame)
-                    previous_frames.append(frame)
-                    previous_boxes.append(results['boxes'])
-                
-                if len(previous_frames) > detection_delay:
-                    previous_frames.pop(0)
-                    previous_boxes.pop(0)
-
-        frame_number += 1
-
-    cap.release()
-
-@app.post("/process-image/")
-async def process_image_endpoint(file: UploadFile = File(...)):
-    image_data = await file.read()
-    image = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    
-    processed_image = process_image(image)
-
-    _, buffer = cv2.imencode('.jpg', processed_image)
-    return StreamingResponse(BytesIO(buffer), media_type="image/jpeg")
+def is_significantly_different(new_boxes, prev_boxes, threshold=0.01):
+    for new_box in new_boxes:
+        for prev_box in prev_boxes:
+            if overlap_percentage(new_box, prev_box) > threshold:
+                return False
+    return True
 
 @app.post("/process-video/")
 async def process_video_endpoint(file: UploadFile = File(...)):
@@ -175,22 +123,53 @@ async def process_video_endpoint(file: UploadFile = File(...)):
     with open(temp_video_path, "wb") as f:
         f.write(video_data)
     
-    output_folder = "output_frames"
-    process_video(temp_video_path, output_folder)
-    
-    # Create a zip file with the frames
-    import shutil
-    output_zip_path = "output_frames.zip"
-    shutil.make_archive("output_frames", 'zip', output_folder)
+    cap = cv2.VideoCapture(temp_video_path)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_rate = cap.get(cv2.CAP_PROP_FPS)
 
-    with open(output_zip_path, "rb") as f:
-        zip_bytes = f.read()
+    frames_per_second = 20
+    frame_interval = int(frame_rate / frames_per_second)
 
-    os.remove(temp_video_path)
+    output_folder = "output_images"
+    os.makedirs(output_folder, exist_ok=True)
+
+    frame_number = 0
+    prev_detections = []
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_number % frame_interval == 0:
+            results = detection(frame)
+            if results['boxes'] and is_significantly_different(results['boxes'], prev_detections):
+                prev_detections.extend(results['boxes'])
+                for box, conf, cls in zip(results['boxes'], results['confidences'], results['classes']):
+                    left, top, width, height = box
+                    right, bottom = left + width, top + height
+                    label = f"{cls} ({conf:.2f}%)"
+
+                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                    cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                cv2.imwrite(f"{output_folder}/frame_{frame_number}.jpg", frame)
+        
+        frame_number += 1
+
+    cap.release()
+
+    zip_path = "processed_images.zip"
+    with ZipFile(zip_path, "w") as zip_file:
+        for filename in os.listdir(output_folder):
+            file_path = os.path.join(output_folder, filename)
+            zip_file.write(file_path, filename)
+
     shutil.rmtree(output_folder)
-    os.remove(output_zip_path)
-    
-    return StreamingResponse(BytesIO(zip_bytes), media_type="application/zip")
+    os.remove(temp_video_path)
+
+    return StreamingResponse(BytesIO(open(zip_path, "rb").read()), media_type="application/zip")
 
 if __name__ == "__main__":
     import uvicorn
