@@ -5,7 +5,9 @@ import cv2
 import numpy as np
 import os
 from typing import List, Tuple
+import logging
 
+logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # Define the Detection class as provided
@@ -16,6 +18,9 @@ class Detection:
         self.model = self.__load_model()
 
     def __load_model(self) -> cv2.dnn_Net:
+        logging.info(f"Loading model from {self.model_path}")
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Model file {self.model_path} not found")
         net = cv2.dnn.readNet(self.model_path)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA_FP16)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
@@ -97,12 +102,13 @@ def is_frame_different(frame1: np.ndarray, frame2: np.ndarray, threshold: float 
     return (non_zero_count / total_pixels) > threshold
 
 def process_video(video_path: str, output_folder: str, detection_delay: int = 30):
+    logging.info(f"Processing video: {video_path}")
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
         
     cap = cv2.VideoCapture(video_path)
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
-    frames_per_second = 20
+    frames_per_second = 15
     frame_interval = int(frame_rate / frames_per_second)
 
     previous_detections = []
